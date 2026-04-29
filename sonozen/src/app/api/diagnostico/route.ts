@@ -29,7 +29,6 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Diagnóstico não encontrado." }, { status: 404 });
     }
 
-    // O SEU PROMPT COMPLETO E EXATO AQUI
     const systemPrompt = `
 <INSTRUCOES_DE_SISTEMA>
 Você é um processador de dados clínicos. Sua função é receber um JSON de input com hábitos de sono, aplicar regras de negócio de cronobiologia e retornar EXCLUSIVAMENTE um objeto JSON válido.
@@ -94,7 +93,6 @@ SCHEMA DE SAÍDA OBRIGATÓRIO (RESPEITE OS LIMITES DE TAMANHO):
 </INSTRUCOES_DE_SISTEMA>
 `;
 
-    // Injeta os dados do Supabase diretamente na tag dinâmica
     const promptCompleto = `${systemPrompt}\n\n<INPUT_USUARIO>\n${JSON.stringify(diagnosticoInput, null, 2)}\n</INPUT_USUARIO>`;
 
     const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
@@ -110,8 +108,7 @@ SCHEMA DE SAÍDA OBRIGATÓRIO (RESPEITE OS LIMITES DE TAMANHO):
     await Promise.all([
       supabaseAdmin.from("rotinas_pre_sono").delete().eq("usuario_id", usuarioId),
       supabaseAdmin.from("fatores_risco_detectados").delete().eq("usuario_id", usuarioId),
-      supabaseAdmin.from("usuario_dicas").delete().eq("usuario_id", usuarioId),
-      supabaseAdmin.from("dicas_personalizadas").delete().eq("usuario_id", usuarioId)
+      supabaseAdmin.from("usuario_dicas").delete().eq("usuario_id", usuarioId)
     ]);
 
     // 5. ATUALIZAÇÃO DO DIAGNÓSTICO
@@ -127,19 +124,21 @@ SCHEMA DE SAÍDA OBRIGATÓRIO (RESPEITE OS LIMITES DE TAMANHO):
 
     if (updateError) throw new Error(`Erro no Update: ${updateError.message}`);
 
-    // 6. Inserções das novas tabelas
+    // 6. Inserções da Rotina (INTACTO)
     if (iaData.rotina?.length > 0) {
       await supabaseAdmin.from("rotinas_pre_sono").insert(
         iaData.rotina.map((r: any) => ({ ...r, usuario_id: usuarioId, diagnostico_id: diagnosticoId }))
       );
     }
 
+    // 7. Inserções dos Fatores de Risco (INTACTO)
     if (iaData.riscos?.length > 0) {
       await supabaseAdmin.from("fatores_risco_detectados").insert(
         iaData.riscos.map((r: any) => ({ ...r, usuario_id: usuarioId, diagnostico_id: diagnosticoId }))
       );
     }
 
+    // 8. Inserções das Dicas (NOVO: Cadastra na tabela dicas e vincula)
     if (iaData.dicas_selecionadas?.length > 0) {
       await supabaseAdmin.from("usuario_dicas").insert(
         iaData.dicas_selecionadas.map((id: number) => ({ dica_id: id, usuario_id: usuarioId }))
@@ -147,9 +146,31 @@ SCHEMA DE SAÍDA OBRIGATÓRIO (RESPEITE OS LIMITES DE TAMANHO):
     }
 
     if (iaData.dicas_personalizadas?.length > 0) {
-      await supabaseAdmin.from("dicas_personalizadas").insert(
-        iaData.dicas_personalizadas.map((d: any) => ({ ...d, usuario_id: usuarioId, diagnostico_id: diagnosticoId }))
-      );
+      // Prepara o objeto para a tabela 'dicas'
+      const dicasParaInserir = iaData.dicas_personalizadas.map((d: any) => ({
+        titulo: d.titulo,
+        descricao: d.descricao,
+        icone_nome: d.icone_nome,
+        categoria: "IA Sob Medida",
+        is_generica: false
+      }));
+
+      // Insere na tabela 'dicas' e pede os IDs de volta
+      const { data: dicasInseridas, error: erroDicas } = await supabaseAdmin
+        .from("dicas")
+        .insert(dicasParaInserir)
+        .select('id');
+
+      if (erroDicas) throw new Error(`Falha ao inserir dicas gerais: ${erroDicas.message}`);
+
+      // Faz o match na tabela 'usuario_dicas'
+      if (dicasInseridas && dicasInseridas.length > 0) {
+        const vinculosPersonalizados = dicasInseridas.map((d: any) => ({
+          dica_id: d.id,
+          usuario_id: usuarioId
+        }));
+        await supabaseAdmin.from("usuario_dicas").insert(vinculosPersonalizados);
+      }
     }
 
     return NextResponse.json({ success: true });
